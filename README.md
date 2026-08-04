@@ -7,11 +7,11 @@
 </p>
 
 <p align="center">
-  <a href="https://www.geo-fs.com/"><img src="https://img.shields.io/badge/GeoFS-3.9%20%7C%204.0-22d3ee?style=for-the-badge&logo=googleearth&logoColor=white" alt="GeoFS 3.9 | 4.0"></a>
-  <a href="https://www.tampermonkey.net/"><img src="https://img.shields.io/badge/Tampermonkey-userscript-f472b6?style=for-the-badge&logo=tampermonkey&logoColor=white" alt="Tampermonkey"></a>
-  <a href="https://github.com/machpoint82/GeoFsRampRadar"><img src="https://img.shields.io/badge/GitHub-GeoFsRampRadar-0e2138?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-c9a227?style=for-the-badge" alt="MIT License"></a>
-  <a href="https://github.com/machpoint82/GeoFsRampRadar/releases"><img src="https://img.shields.io/badge/version-1.0.0-5eead4?style=for-the-badge" alt="v1.0.0"></a>
+  <a href="https://github.com/machpoint82/GeoFsRampRadar"><img src="https://img.shields.io/badge/github-repo-blue?logo=github" alt="GitHub"></a>
+  <a href="https://github.com/machpoint82/GeoFsRampRadar/releases"><img src="https://img.shields.io/badge/version-1.0.0-cyan" alt="Version"></a>
+  <a href="https://www.geo-fs.com/"><img src="https://img.shields.io/badge/GeoFS-3.9%20%7C%204.0-blue" alt="GeoFS"></a>
+  <a href="https://www.tampermonkey.net/"><img src="https://img.shields.io/badge/Tampermonkey-userscript-green" alt="Tampermonkey"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="License"></a>
 </p>
 
 **Live airport surface charts for [GeoFS](https://www.geo-fs.com/)** — taxiways, gates, runways, live multiplayer traffic, METAR, and digital ATIS. Lightweight standalone addon (no AeroDeck required).
@@ -101,6 +101,7 @@ Charts are loaded from:
 - **Airport names / positions** — [mwgg/airports](https://github.com/mwgg/airports)
 - **METAR** — [NOAA Aviation Weather Center](https://aviationweather.gov/)
 - **Digital ATIS** — [DATIS](https://datis.clowd.io/) (mainly US); elsewhere: decoded METAR (not official ATIS)
+- Aircraft icons from **Experimental Flight Interface (EFI)** by [Ferhatduran55](https://github.com/Ferhatduran55) — [geofs-experimental-fi](https://github.com/Ferhatduran55/geofs-experimental-fi).
 
 ---
 
