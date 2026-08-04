@@ -21,7 +21,6 @@
 (function () {
     'use strict';
 
-    // Charts from your GeoFsRampRadar repo (push charts/ then this resolves via jsDelivr)
     const CHARTS_BASE_URL = 'https://cdn.jsdelivr.net/gh/machpoint82/GeoFsRampRadar@main/charts';
     const AIRPORTS_URL = 'https://raw.githubusercontent.com/mwgg/airports/master/airports.json';
     const SCRIPT_VERSION = '1.0.0';
