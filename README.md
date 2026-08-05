@@ -118,10 +118,11 @@ Charts are loaded from:
 
 ## License
 
-[MIT](LICENSE) © machpoint82
+[MIT](LICENSE) © _machpoint82_
 
 ---
 
 ## Credits
 
-Chart rendering concepts inspired by community GeoFS tools and the AeroDeck EFB charts module. Aircraft silhouettes adapted for surface-map use. Not affiliated with GeoFS / GEFS.
+- Chart rendering concepts inspired by community GeoFS tools and the [AeroDeck EFB](https://github.com/machpoint82/geofs-aero-deck) charts module.
+- Aircraft icons from **Experimental Flight Interface (EFI)** by [Ferhatduran55](https://github.com/Ferhatduran55) — [geofs-experimental-fi](https://github.com/Ferhatduran55/geofs-experimental-fi).
