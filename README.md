@@ -60,7 +60,20 @@
 | **—** minimize | Compact floating chart; drag & resize |
 | METAR/ATIS tab | Origin & dest weather + manual lookup |
 
-Missing a chart? [Open a GitHub Issue](https://github.com/machpoint82/GeoFsRampRadar/issues) and request the airport ICAO.
+## Requests & issues
+
+Use GitHub Issues so requests stay searchable and don’t get lost in chat.
+
+| Type | Use when | Open |
+|------|----------|------|
+| **Airport chart request** | You need a diagram for an ICAO that isn’t in `charts/` yet | [New chart request](https://github.com/machpoint82/GeoFsRampRadar/issues/new?template=airport-chart-request.md) |
+| **Feature request** | Idea for the tablet, tabs, SimBrief, multiplayer, etc. | [New feature request](https://github.com/machpoint82/GeoFsRampRadar/issues/new?template=feature-request.md) |
+| **Bug report** | Something broken in GeoFS with AeroDeck | [New issue](https://github.com/machpoint82/GeoFsRampRadar/issues/new) |
+
+Before opening a chart request, check whether `charts/YOURICAO.json` already exists and whether someone already filed the same ICAO.
+Currently 1000+ Airports charts are supported. See [Airports List](Airports%20Coverage.txt) for full airports list
+                                                   [Airports ICAO](airports.txt)
+---
 
 ---
 
