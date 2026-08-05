@@ -62,8 +62,6 @@
 
 ## Requests & issues
 
-Use GitHub Issues so requests stay searchable and don’t get lost in chat.
-
 | Type | Use when | Open |
 |------|----------|------|
 | **Airport chart request** | You need a diagram for an ICAO that isn’t in `charts/` yet | [New chart request](https://github.com/machpoint82/GeoFsRampRadar/issues/new?template=airport-chart-request.md) |
