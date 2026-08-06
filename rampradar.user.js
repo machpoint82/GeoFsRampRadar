@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RampRadar — GeoFS Live Charts
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
+// @version      1.0.1
 // @description  Live airport surface charts for GeoFS — traffic, METAR, digital ATIS.
 // @author       machpoint82
 // @match        *://www.geo-fs.com/*
@@ -20,18 +20,21 @@
 
 (function () {
     'use strict';
-
     const CHARTS_BASE_URL = 'https://cdn.jsdelivr.net/gh/machpoint82/GeoFsRampRadar@main/charts';
     const AIRPORTS_URL = 'https://raw.githubusercontent.com/mwgg/airports/master/airports.json';
-    const SCRIPT_VERSION = '1.0.0';
+    const SCRIPT_VERSION = '1.0.1';
     const VERSION_CHECK_URL = 'https://raw.githubusercontent.com/machpoint82/GeoFsRampRadar/main/rampradar.user.js';
     const CHANGELOG_URL = 'https://raw.githubusercontent.com/machpoint82/GeoFsRampRadar/main/CHANGELOG.md';
     const ISSUES_URL = 'https://github.com/machpoint82/GeoFsRampRadar/issues';
-    // Greasy Fork / raw install URL for Tampermonkey “update” open-in-new-tab
     const SCRIPT_INSTALL_URL = 'https://raw.githubusercontent.com/machpoint82/GeoFsRampRadar/main/rampradar.user.js';
     const METAR_CACHE_MS = 10 * 60 * 1000;
     const ATIS_CACHE_MS = 5 * 60 * 1000;
     const SCRIPT_CHANGELOG = {
+        '1.0.1': [
+            'Chart ALIGN nudges (N/S/E/W) per airport when GeoFS coords disagree with diagram',
+            'Better live position source and aircraft icon pivot centering',
+            'Scrollable METAR/ATIS tab'
+        ],
         '1.0.0': [
             'Initial release: live airport charts, GeoFS traffic, METAR + digital ATIS',
             'Minimize mode, bookmarks, origin/dest chips, optional callsign'
@@ -48,7 +51,8 @@
         OPEN_SHORTCUT: 'rampradar_open_shortcut',
         ROUTE_ORIGIN: 'rampradar_route_origin',
         ROUTE_DEST: 'rampradar_route_dest',
-        CALLSIGN: 'rampradar_callsign'
+        CALLSIGN: 'rampradar_callsign',
+        CHART_OFFSETS: 'rampradar_chart_offsets_v1'  // { ICAO: { eastM, northM } }
     };
 
     function pageGeofs() {
@@ -104,10 +108,20 @@
 
     function getCurrentLatLon() {
         try {
+            const av = (typeof geofs !== 'undefined' && geofs.animation && geofs.animation.values) || null;
+            if (av && typeof av.lat === 'number' && typeof av.lon === 'number' &&
+                Number.isFinite(av.lat) && Number.isFinite(av.lon) &&
+                !(av.lat === 0 && av.lon === 0)) {
+                return { lat: av.lat, lon: av.lon };
+            }
+        } catch (e) {}
+        try {
             const g = pageGeofs();
             const inst = g && g.aircraft && g.aircraft.instance;
-            if (inst && Array.isArray(inst.llaLocation) && inst.llaLocation.length >= 2)
-                return { lat: inst.llaLocation[0], lon: inst.llaLocation[1] };
+            if (inst && Array.isArray(inst.llaLocation) && inst.llaLocation.length >= 2) {
+                const lat = inst.llaLocation[0], lon = inst.llaLocation[1];
+                if (Number.isFinite(lat) && Number.isFinite(lon)) return { lat, lon };
+            }
         } catch (e) {}
         return null;
     }
@@ -373,7 +387,8 @@ const groups = {
         const g = document.createElementNS(NS, 'g');
         g.setAttribute('class', 'aircraft-marker');
         const inner = document.createElementNS(NS, 'g');
-        inner.setAttribute('transform', `translate(-20,-20) scale(${scale != null ? scale : 0.55})`);
+        const s = scale != null ? scale : 0.55;
+        inner.setAttribute('transform', `translate(${-20 * s},${-21 * s}) scale(${s})`);
         inner.appendChild(createAircraftIconEl(NS, group, className));
         g.appendChild(inner);
         return g;
@@ -531,6 +546,32 @@ const groups = {
     function getChartFollow() { return gmGet(STORAGE.CHART_FOLLOW, false) === true; }
     function setChartFollow(on) { gmSet(STORAGE.CHART_FOLLOW, !!on); }
     let followTargetId = null;
+
+    function getChartOffsets() {
+        const v = gmGet(STORAGE.CHART_OFFSETS, null);
+        return v && typeof v === 'object' ? v : {};
+    }
+    function getOffsetFor(icao) {
+        const all = getChartOffsets();
+        const o = all[(icao || '').toUpperCase()] || {};
+        return { eastM: Number(o.eastM) || 0, northM: Number(o.northM) || 0 };
+    }
+    function setOffsetFor(icao, eastM, northM) {
+        icao = (icao || '').toUpperCase();
+        if (!/^[A-Z0-9]{4}$/.test(icao)) return;
+        const all = getChartOffsets();
+        if (!eastM && !northM) delete all[icao];
+        else all[icao] = { eastM: Number(eastM) || 0, northM: Number(northM) || 0 };
+        gmSet(STORAGE.CHART_OFFSETS, all);
+    }
+    function nudgeOffset(icao, dEast, dNorth) {
+        const cur = getOffsetFor(icao);
+        setOffsetFor(icao, cur.eastM + dEast, cur.northM + dNorth);
+        if (chartState && chartState._rebuildPx) chartState._rebuildPx();
+        updateChartAircraft();
+        updateChartOtherAircraft();
+    }
+
     function applyChartLayers() {
         if (!chartState) return;
         const L = getChartLayers();
@@ -597,7 +638,25 @@ function buildChartSVG(container, data, icao) {
         const spanX = Math.max(maxX - minX, 1), spanY = Math.max(maxY - minY, 1);
         const scale = Math.min((VB_W - 2 * PAD) / spanX, (VB_H - 2 * PAD) / spanY);
         const cx = (minX + maxX) / 2, cyc = (minY + maxY) / 2;
-        function px(lat, lon) { const [x, y] = toMeters(lat, lon); return [(x - cx) * scale + VB_W / 2, (y - cyc) * scale + VB_H / 2]; }
+        let liveEastM = 0, liveNorthM = 0;
+        (function loadOff() {
+            const o = getOffsetFor(icao);
+            liveEastM = o.eastM; liveNorthM = o.northM;
+        })();
+        function px(lat, lon) {
+            const [x, y] = toMeters(lat, lon);
+            return [(x - cx) * scale + VB_W / 2, (y - cyc) * scale + VB_H / 2];
+        }
+        function pxLive(lat, lon) {
+            const [x, y] = toMeters(lat, lon);
+            const xo = x + liveEastM;
+            const yo = y - liveNorthM;
+            return [(xo - cx) * scale + VB_W / 2, (yo - cyc) * scale + VB_H / 2];
+        }
+        function _rebuildPx() {
+            const o = getOffsetFor(icao);
+            liveEastM = o.eastM; liveNorthM = o.northM;
+        }
 
         const gApron = el('g', {});
         function terminalKey(name) { if (!name) return null; const m = name.trim().match(/^(T\d+)\b/i); return m ? m[1].toUpperCase() : null; }
@@ -816,7 +875,7 @@ function buildChartSVG(container, data, icao) {
             container.removeEventListener('mouseup', onUp);
             container.removeEventListener('mouseleave', onUp);
         };
-        const out = { svg, px, acEl, gOthers, gTaxi, gTaxiLabels, gGates, freqRows, _ownGroup: ownGroup0 };
+        const out = { svg, px, pxLive, _rebuildPx, acEl, gOthers, gTaxi, gTaxiLabels, gGates, freqRows, _ownGroup: ownGroup0 };
         setTimeout(applyChartLayers, 0);
         return out;
     }
@@ -841,7 +900,8 @@ function buildChartSVG(container, data, icao) {
         const pos = getCurrentLatLon();
         if (!pos) return;
         const heading = getCurrentHeading() || 0;
-        const [x, y] = chartState.px(pos.lat, pos.lon);
+        const mapFn = chartState.pxLive || chartState.px;
+        const [x, y] = mapFn(pos.lat, pos.lon);
         const layers = getChartLayers();
         const within = x > -300 && x < 1300 && y > -300 && y < 1000;
         const det = detectCurrentAircraft();
@@ -854,7 +914,7 @@ function buildChartSVG(container, data, icao) {
                 const NS = 'http://www.w3.org/2000/svg';
                 chartState.acEl.innerHTML = '';
                 const inner = document.createElementNS(NS, 'g');
-                inner.setAttribute('transform', 'translate(-20,-20) scale(0.6)');
+                inner.setAttribute('transform', 'translate(-12,-12.6) scale(0.6)');
                 inner.appendChild(createAircraftIconEl(NS, group, 'aircraft'));
                 chartState.acEl.appendChild(inner);
             }
@@ -880,8 +940,9 @@ function buildChartSVG(container, data, icao) {
         chartState.gOthers.innerHTML = '';
         const layers = getChartLayers();
         if (layers.aircraft === false) return;
+        const mapFn = chartState.pxLive || chartState.px;
         refreshTraffic().forEach((u) => {
-            const [x, y] = chartState.px(u.lat, u.lon);
+            const [x, y] = mapFn(u.lat, u.lon);
             if (x <= -300 || x >= 1300 || y <= -300 || y >= 1000) return;
             const g = makeAircraftMarker(NS, u.group || 'default', 'other-aircraft', 0.5);
             g.setAttribute('transform', `translate(${x},${y}) rotate(${u.heading || 0})`);
@@ -1060,7 +1121,6 @@ function buildChartSVG(container, data, icao) {
         if (cached && (Date.now() - cached.ts < ATIS_CACHE_MS)) return cached.result;
         let result;
         try {
-            // Real digital ATIS where available (mainly US via DATIS)
             const text = await gmFetchText('https://datis.clowd.io/api/' + encodeURIComponent(icao), 10000);
             const json = JSON.parse(text);
             const arr = Array.isArray(json) ? json : [json];
@@ -1075,14 +1135,11 @@ function buildChartSVG(container, data, icao) {
                 }))
             };
         } catch (e) {
-            // No free worldwide ATIS API — fall back to decoded METAR (clearly labeled)
             result = { source: 'none', error: 'No digital ATIS (DATIS is mainly US). Showing decoded METAR instead.' };
         }
         atisMemCache[icao] = { ts: Date.now(), result };
         return result;
     }
-
-    // ---- version check (Tools tab) ----
     let remoteVersion = null;
     let remoteChangelogText = null;
     let versionCheckDone = false;
@@ -1230,7 +1287,6 @@ function buildChartSVG(container, data, icao) {
             #rampradar-topbar .icon-btn:hover, #rampradar-tabs button:hover { border-color: #22d3ee; color: #22d3ee; }
             #rampradar-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 10px 12px 12px; overflow-y: auto; overflow-x: hidden; }
             #rampradar-panel.is-mini #rampradar-body { padding: 6px 8px 8px; overflow: hidden; }
-            /* Charts tab keeps internal chart scroll; weather/bookmarks/tools use body scroll */
             #rampradar-body.rr-scroll { overflow-y: auto; }
             #rampradar-body.rr-charts-mode { overflow: hidden; }
             #rampradar-tools { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-bottom: 8px; flex-shrink: 0; }
@@ -1243,6 +1299,9 @@ function buildChartSVG(container, data, icao) {
                 display: inline-flex; align-items: center; gap: 4px; cursor: pointer; user-select: none;
                 font-size: 10px; font-weight: 700; color: #6f85a0;
             }
+            #rampradar-tools .rr-align-group { display: inline-flex; align-items: center; gap: 3px; margin-left: 4px; }
+            #rampradar-tools .rr-align-label { font-size: 9px; font-weight: 800; color: #6f85a0; letter-spacing: 0.4px; }
+            #rampradar-tools .rr-align { padding: 4px 7px !important; min-width: 24px; }
             #rampradar-tools input { accent-color: #22d3ee; }
             #rampradar-search-row { display: flex; gap: 6px; margin-bottom: 8px; flex-shrink: 0; align-items: center; flex-wrap: wrap; }
             #rampradar-search-row input {
@@ -1392,6 +1451,14 @@ function buildChartSVG(container, data, icao) {
                 <label class="layer-toggle"><input type="checkbox" data-layer="legend" ${L.legend ? 'checked' : ''}> Legend</label>
                 <label class="layer-toggle"><input type="checkbox" data-layer="aircraft" ${L.aircraft ? 'checked' : ''}> Traffic</label>
                 <label class="layer-toggle"><input type="checkbox" id="rr-follow" ${getChartFollow() ? 'checked' : ''}> Follow</label>
+                <span class="rr-align-group" title="Nudge aircraft on chart when GeoFS coords disagree with diagram">
+                    <span class="rr-align-label">ALIGN</span>
+                    <button type="button" class="mode-btn rr-align" data-align="n">N</button>
+                    <button type="button" class="mode-btn rr-align" data-align="s">S</button>
+                    <button type="button" class="mode-btn rr-align" data-align="e">E</button>
+                    <button type="button" class="mode-btn rr-align" data-align="w">W</button>
+                    <button type="button" class="mode-btn rr-align" data-align="reset" title="Reset alignment">↺</button>
+                </span>
             </div>
             <div id="rampradar-search-row" class="rr-full-only">
                 <input id="rampradar-icao-input" type="text" placeholder="AIRPORT ICAO" maxlength="4" value="${escapeHtml(activeIcao)}">
@@ -1413,6 +1480,18 @@ function buildChartSVG(container, data, icao) {
         });
         const follow = body.querySelector('#rr-follow');
         if (follow) follow.onchange = () => { setChartFollow(follow.checked); if (!follow.checked) followTargetId = null; };
+        const STEP = 8; // meters per click
+        body.querySelectorAll('[data-align]').forEach((btn) => {
+            btn.onclick = () => {
+                if (!activeIcao) return;
+                const d = btn.getAttribute('data-align');
+                if (d === 'reset') { setOffsetFor(activeIcao, 0, 0); if (chartState && chartState._rebuildPx) chartState._rebuildPx(); updateChartAircraft(); updateChartOtherAircraft(); return; }
+                if (d === 'n') nudgeOffset(activeIcao, 0, STEP);
+                if (d === 's') nudgeOffset(activeIcao, 0, -STEP);
+                if (d === 'e') nudgeOffset(activeIcao, STEP, 0);
+                if (d === 'w') nudgeOffset(activeIcao, -STEP, 0);
+            };
+        });
         const nearestBtn = body.querySelector('#rr-nearest');
         if (nearestBtn) nearestBtn.onclick = async () => {
             const st = body.querySelector('#rampradar-status');
@@ -1617,7 +1696,6 @@ function buildChartSVG(container, data, icao) {
             b.classList.toggle('active', b.getAttribute('data-tab') === activeTab);
         });
         if (minimized) {
-            // mini: charts only, compact
             activeTab = 'charts';
             body.classList.add('rr-charts-mode');
             body.classList.remove('rr-scroll');
