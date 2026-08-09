@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/machpoint82/GeoFsRampRadar"><img src="https://img.shields.io/badge/github-repo-blue?logo=github" alt="GitHub"></a>
-  <a href="https://github.com/machpoint82/GeoFsRampRadar/releases"><img src="https://img.shields.io/badge/version-1.0.1-cyan" alt="Version"></a>
+  <a href="https://github.com/machpoint82/GeoFsRampRadar/releases"><img src="https://img.shields.io/badge/version-1.0.2-cyan" alt="Version"></a>
   <a href="https://www.geo-fs.com/"><img src="https://img.shields.io/badge/GeoFS-3.9%20%7C%204.0-blue" alt="GeoFS"></a>
   <a href="https://www.tampermonkey.net/"><img src="https://img.shields.io/badge/Tampermonkey-userscript-green" alt="Tampermonkey"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="License"></a>
