@@ -111,7 +111,7 @@ Charts are loaded from:
 - **Charts** — this repository (`charts/`)
 - **Airport names / positions** — [mwgg/airports](https://github.com/mwgg/airports)
 - **METAR** — [NOAA Aviation Weather Center](https://aviationweather.gov/)
-- **Digital ATIS** — [DATIS](https://datis.clowd.io/) (mainly US); elsewhere: decoded METAR (not official ATIS)
+- **Digital ATIS** - ATIS sourced from live VATSIM online ATIS stations (If ATIS is not present at an airport, ATIS sourced from decoded METAR)
 - Aircraft icons from **Experimental Flight Interface (EFI)** by [Ferhatduran55](https://github.com/Ferhatduran55) — [geofs-experimental-fi](https://github.com/Ferhatduran55/geofs-experimental-fi).
 
 ---
