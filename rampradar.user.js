@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RampRadar — GeoFS Live Charts
 // @namespace    http://tampermonkey.net/
-// @version      1.0.1
+// @version      1.0.2
 // @description  Live airport surface charts for GeoFS — traffic, METAR, digital ATIS.
 // @author       machpoint82
 // @match        *://www.geo-fs.com/*
@@ -16,20 +16,26 @@
 // @connect      aviationweather.gov
 // @connect      datis.clowd.io
 // @connect      metar.vatsim.net
+// @connect      data.vatsim.net
 // ==/UserScript==
 
 (function () {
     'use strict';
     const CHARTS_BASE_URL = 'https://cdn.jsdelivr.net/gh/machpoint82/GeoFsRampRadar@main/charts';
     const AIRPORTS_URL = 'https://raw.githubusercontent.com/mwgg/airports/master/airports.json';
-    const SCRIPT_VERSION = '1.0.1';
+    const SCRIPT_VERSION = '1.0.2';
     const VERSION_CHECK_URL = 'https://raw.githubusercontent.com/machpoint82/GeoFsRampRadar/main/rampradar.user.js';
     const CHANGELOG_URL = 'https://raw.githubusercontent.com/machpoint82/GeoFsRampRadar/main/CHANGELOG.md';
     const ISSUES_URL = 'https://github.com/machpoint82/GeoFsRampRadar/issues';
     const SCRIPT_INSTALL_URL = 'https://raw.githubusercontent.com/machpoint82/GeoFsRampRadar/main/rampradar.user.js';
     const METAR_CACHE_MS = 10 * 60 * 1000;
     const ATIS_CACHE_MS = 5 * 60 * 1000;
+    const VATSIM_CACHE_MS = 60 * 1000;
     const SCRIPT_CHANGELOG = {
+        '1.0.2': [
+            'ATIS now sourced live from the VATSIM network (real controller-issued ATIS) when a station is online',
+            'Falls back to automated D-ATIS, then decoded METAR, when no live VATSIM ATIS is available'
+        ],
         '1.0.1': [
             'Chart ALIGN nudges (N/S/E/W) per airport when GeoFS coords disagree with diagram',
             'Better live position source and aircraft icon pivot centering',
@@ -702,12 +708,6 @@ function buildChartSVG(container, data, icao) {
         viewport.appendChild(gApron);
 
         const gRwy = el('g', {}), gRwyLabels = el('g', {}), runwayPolys = [];
-        // Shared collision registry: every label placed anywhere on the chart reserves
-        // its box here, and every later label (taxi, then gate) is skipped if it would
-        // land on top of something already placed. Runways go first (highest priority,
-        // rarely crowded), then named taxiways, then LINK segments, then gate numbers —
-        // so the numerous small gate labels are the ones that yield space, not the
-        // taxiway names pilots actually need to read.
         const placedLabelRects = [];
         function estLabelWidth(text, fontSize) { return String(text).length * fontSize * 0.62 + 2; }
         function labelRect(cx, cy, text, fontSize) {
@@ -770,7 +770,6 @@ function buildChartSVG(container, data, icao) {
             }
             return false;
         }
-        // Named taxiways only — hide LINK* designators (clutter). Max 2 labels per name.
         const MIN_LABEL_SEP = 150;
         const groupNames = Object.keys(groups).filter((n) => !/^link\d*$/i.test((n || '').trim()))
             .sort((a, b) => String(a).length - String(b).length);
@@ -807,7 +806,6 @@ function buildChartSVG(container, data, icao) {
 
         const gGates = el('g', {});
         function shortGateLabel(name) { if (!name) return ''; const parts = name.trim().split(/\s+/); return parts[parts.length - 1]; }
-        // Show more gates: tighter spacing, always draw tick; labels when space allows
         const GATE_LABEL_SPACING = 12, GATE_TICK_SPACING = 4, placedGateLabels = [], placedGateTicks = [];
         (data.gates || []).forEach((g) => {
             const [x, y] = px(g.lat, g.lon);
@@ -823,7 +821,6 @@ function buildChartSVG(container, data, icao) {
             if (!gateText) return;
             const tooCloseToGate = placedGateLabels.some((p) => Math.hypot(p[0] - x, p[1] - y) < GATE_LABEL_SPACING);
             const rect = labelRect(x + 3 + estLabelWidth(gateText, 7.5) / 2, y + 2, gateText, 7.5);
-            // Prefer showing gate numbers even if slightly near taxi labels
             if (!tooCloseToGate) {
                 const t = el('text', { x: x + 3, y: y + 2.5, class: 'gate-label' });
                 t.textContent = gateText;
@@ -856,7 +853,7 @@ function buildChartSVG(container, data, icao) {
             viewport.setAttribute('transform', `translate(${panX},${panY}) scale(${zoom})`);
             if (icao) chartViewState[icao] = { zoom, panX, panY };
         }
-        applyTransform(); // apply the restored view immediately, don't wait for the first zoom/pan action
+        applyTransform();
         function onWheel(e) { e.preventDefault(); e.stopPropagation(); const factor = e.deltaY > 0 ? 0.9 : 1.1; zoom = Math.min(6, Math.max(0.5, zoom * factor)); applyTransform(); }
         let dragging = false, lastX = 0, lastY = 0;
         function onDown(e) { dragging = true; lastX = e.clientX; lastY = e.clientY; }
@@ -1045,7 +1042,6 @@ function buildChartSVG(container, data, icao) {
         for (const icao in airportsDb) {
             const a = airportsDb[icao];
             if (!a || a.lat == null || a.lon == null) continue;
-            // Prefer real ICAO-looking keys
             if (!/^[A-Z0-9]{4}$/.test(icao)) continue;
             const d = haversineNM(pos.lat, pos.lon, a.lat, a.lon);
             if (d < bestD) { bestD = d; best = icao; }
@@ -1140,6 +1136,27 @@ function buildChartSVG(container, data, icao) {
         atisMemCache[icao] = { ts: Date.now(), result };
         return result;
     }
+    let vatsimDataCache = { ts: 0, data: null };
+    async function getVatsimData() {
+        if (vatsimDataCache.data && (Date.now() - vatsimDataCache.ts < VATSIM_CACHE_MS)) return vatsimDataCache.data;
+        try {
+            const text = await gmFetchText('https://data.vatsim.net/v3/vatsim-data.json', 15000);
+            vatsimDataCache = { ts: Date.now(), data: JSON.parse(text) };
+        } catch (e) {}
+        return vatsimDataCache.data;
+    }
+    async function fetchVatsimAtis(icao) {
+        const data = await getVatsimData();
+        if (!data || !Array.isArray(data.atis)) return null;
+        const matches = data.atis.filter((a) => (a.callsign || '').toUpperCase().startsWith(icao.toUpperCase() + '_'));
+        if (!matches.length) return null;
+        return matches.map((m) => ({
+            callsign: m.callsign,
+            code: m.atis_code || '',
+            freq: m.frequency || '',
+            text: Array.isArray(m.text_atis) ? m.text_atis.join(' ') : (m.text_atis || '')
+        }));
+    }
     let remoteVersion = null;
     let remoteChangelogText = null;
     let versionCheckDone = false;
@@ -1189,7 +1206,7 @@ function buildChartSVG(container, data, icao) {
                 const md = await gmFetchText(CHANGELOG_URL + '?t=' + Date.now(), 8000);
                 remoteChangelogText = md;
             }
-        } catch (e) { /* optional */ }
+        } catch (e) { }
         if (panelOpen && !minimized && activeTab === 'tools') renderBody();
     }
 
@@ -1413,7 +1430,6 @@ function buildChartSVG(container, data, icao) {
             updateStatus();
             const built = buildChartSVG(canvas, data, icao);
             chartState = built;
-            // Force cyan class on own icon
             try {
                 const path = chartState.acEl && chartState.acEl.querySelector('path');
                 if (path) path.setAttribute('class', 'aircraft');
@@ -1480,7 +1496,7 @@ function buildChartSVG(container, data, icao) {
         });
         const follow = body.querySelector('#rr-follow');
         if (follow) follow.onchange = () => { setChartFollow(follow.checked); if (!follow.checked) followTargetId = null; };
-        const STEP = 8; // meters per click
+        const STEP = 8;
         body.querySelectorAll('[data-align]').forEach((btn) => {
             btn.onclick = () => {
                 if (!activeIcao) return;
@@ -1577,19 +1593,25 @@ function buildChartSVG(container, data, icao) {
         if (!icao) return `<div class="rr-card"><div class="rr-label">${escapeHtml(label)}</div><div class="rr-muted">Not set — use FP sync or set route on Charts.</div></div>`;
         await ensureAirportsDb();
         const aptName = airportLabel(icao);
-        const [metar, atis] = await Promise.all([fetchMetarRaw(icao), fetchDigitalAtis(icao)]);
+        const [metar, vatisRes, datisRes] = await Promise.all([fetchMetarRaw(icao), fetchVatsimAtis(icao), fetchDigitalAtis(icao)]);
         let html = `<div class="rr-card"><div class="rr-label">${escapeHtml(label)} · ${escapeHtml(icao)}</div>`;
         if (aptName) html += `<div class="rr-muted" style="margin-bottom:6px;">${escapeHtml(aptName)}</div>`;
         if (metar.error) html += `<div class="rr-muted" style="color:#e0955c;">${escapeHtml(metar.error)}</div>`;
         else html += `<div class="rr-label" style="margin-top:6px;">METAR</div><div class="rr-atis">${escapeHtml(metar.raw)}</div>`;
-        if (atis.source === 'datis' && atis.items && atis.items.length) {
-            html += `<div class="rr-label" style="margin-top:10px;">DIGITAL ATIS</div>`;
-            html += atis.items.map((it) =>
+        if (vatisRes && vatisRes.length) {
+            html += `<div class="rr-label" style="margin-top:10px;color:#5eead4;">LIVE ATIS — VATSIM NETWORK</div>`;
+            html += vatisRes.map((it) =>
+                `<div class="rr-muted" style="margin-top:4px;">${escapeHtml(it.callsign)} ${it.code ? '· Info ' + escapeHtml(it.code) : ''} ${it.freq ? '· ' + escapeHtml(it.freq) : ''}</div>
+                 <div class="rr-atis">${escapeHtml(it.text)}</div>`
+            ).join('');
+        } else if (datisRes.source === 'datis' && datisRes.items && datisRes.items.length) {
+            html += `<div class="rr-label" style="margin-top:10px;">AUTOMATED D-ATIS</div>`;
+            html += datisRes.items.map((it) =>
                 `<div class="rr-muted" style="margin-top:4px;">Info ${escapeHtml(it.code || '—')} ${it.time ? '· ' + escapeHtml(it.time) + 'Z' : ''} ${it.type ? '(' + escapeHtml(it.type) + ')' : ''}</div>
                  <div class="rr-atis">${escapeHtml(it.text)}</div>`
             ).join('');
         } else {
-            html += `<div class="rr-label" style="margin-top:10px;">DECODED METAR <span style="font-weight:600;opacity:0.7;">(not official ATIS)</span></div>`;
+            html += `<div class="rr-label" style="margin-top:10px;">DECODED METAR <span style="font-weight:600;opacity:0.7;">(no live ATIS on station)</span></div>`;
             if (metar.raw && !metar.error) {
                 const dec = decodeMetarSummary(metar.raw);
                 if (dec) {
@@ -1601,7 +1623,7 @@ function buildChartSVG(container, data, icao) {
                     <div class="rr-row"><span>QNH</span><span>${escapeHtml(dec.qnh)}</span></div>`;
                 }
             } else {
-                html += `<div class="rr-muted">${escapeHtml(atis.error || 'Unavailable')}</div>`;
+                html += `<div class="rr-muted">${escapeHtml(datisRes.error || 'Unavailable')}</div>`;
             }
         }
         html += `</div>`;
@@ -1609,7 +1631,7 @@ function buildChartSVG(container, data, icao) {
     }
     function renderWeatherTab(body) {
         syncRouteFromFlightPlan(false);
-        body.innerHTML = `<div class="rr-muted" style="margin-bottom:8px;">Origin & destination from your route / flight plan. Real digital ATIS when available (DATIS, mainly US); otherwise decoded METAR. METAR from NOAA.</div>
+        body.innerHTML = `<div class="rr-muted" style="margin-bottom:8px;">Origin & destination from your route / flight plan. Live ATIS from the VATSIM network when a station is online, then automated D-ATIS (mainly US), then decoded METAR. METAR from NOAA.</div>
             <div id="rr-wx-blocks"><div class="rr-muted">Loading…</div></div>
             <div class="rr-label" style="margin-top:8px;">LOOKUP</div>
             <div id="rampradar-search-row">
