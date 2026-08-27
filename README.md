@@ -1,4 +1,4 @@
-# [INSTALL](https://raw.githubusercontent.com/machpoint82/GeoFsRampRadar/main/rampradar.user.js)
+# [Click here to install or update](https://raw.githubusercontent.com/machpoint82/GeoFsRampRadar/main/rampradar.user.js)
 
 # RampRadar
 
@@ -26,18 +26,18 @@
 - **Click traffic** to focus / follow
 - **Nearest airport**, **bookmarks**, **ORIG / DEST** chips from flight plan
 - **Optional callsign** shown on your own hover
-- **METAR** (NOAA) + **digital ATIS** (DATIS where available; decoded METAR otherwise)
-- **Minimize mode** — resizable / draggable mini chart while you fly
+- **METAR and ATIS** vATC Suite as primary ATIS and METAR provider and VATSIM as secondary ATIS Provider. Note: VATSIM ATIS is not always online for some airports
+- **Minimize mode** — resizable / draggable mini chart while you taxi
 - **Optional keyboard shortcut** to open / restore / close
 
 ---
 
 ## Install
 
-1. Install **[Tampermonkey](https://www.tampermonkey.net/)** (Chrome, Firefox, Edge, Safari, etc.)
+1. Install **[Tampermonkey](https://www.tampermonkey.net/)** (Chrome, Firefox, Edge, etc.)
 2. Open the raw userscript:
 
-   **[Install RampRadar](https://raw.githubusercontent.com/machpoint82/GeoFsRampRadar/main/rampradar.user.js)**
+   **[Click here to install RampRadar](https://raw.githubusercontent.com/machpoint82/GeoFsRampRadar/main/rampradar.user.js)**
 
 3. Tampermonkey will prompt to install — confirm.
 4. Reload [GeoFS](https://www.geo-fs.com/geofs.php) and click **CHARTS** on the bottom toolbar.
@@ -52,7 +52,7 @@
 |--------|--------|
 | **CHARTS** (toolbar) | Open / close the panel |
 | **AIRPORT ICAO** + LOAD | Open a diagram |
-| **NEAREST** | Chart for the closest airport to your position |
+| **NEAREST** | Chart for the closest airport to your position. Note: The nearest to your position might not have charts  |
 | **ORIG / DEST** | Load origin or destination (from flight plan / FP button) |
 | **☆ SAVE** | Bookmark current airport (manage under Bookmarks tab) |
 | Layer toggles | Taxi / Gates / Legend / Traffic |
@@ -65,7 +65,7 @@
 | Type | Use when | Open |
 |------|----------|------|
 | **Airport chart request** | You need a diagram for an ICAO that isn’t in `charts/` yet | [New chart request](https://github.com/machpoint82/GeoFsRampRadar/issues/new?template=airport-chart-request.md) |
-| **Feature request** | Idea for the tablet, tabs, SimBrief, multiplayer, etc. | [New feature request](https://github.com/machpoint82/GeoFsRampRadar/issues/new?template=feature-request.md) |
+| **Feature request** | Idea for the addon, tabs, multiplayer, etc. | [New feature request](https://github.com/machpoint82/GeoFsRampRadar/issues/new?template=feature-request.md) |
 | **Bug report** | Something broken in GeoFS with AeroDeck | [New issue](https://github.com/machpoint82/GeoFsRampRadar/issues/new) |
 
 Before opening a chart request, check whether `charts/YOURICAO.json` already exists and whether someone already filed the same ICAO.
@@ -73,21 +73,6 @@ Currently 1000+ Airports charts are supported. See [Airports List](Airports%20Co
                                                    [Airports ICAO](airports.txt)
 ---
 
----
-
-## Repository layout
-
-```
-GeoFsRampRadar/
-├── rampradar.user.js    # Tampermonkey userscript
-├── charts/              # Airport diagram JSON (ICAO.json)
-├── preview/
-│   ├── preview.png      # Screenshot for this README
-│   └── icon.png         # Userscript icon
-├── CHANGELOG.md         # Optional release notes
-├── LICENSE
-└── README.md
-```
 
 Charts are loaded from:
 
@@ -100,9 +85,9 @@ Charts are loaded from:
 | Environment | Status |
 |-------------|--------|
 | GeoFS **3.9** | Supported |
-| GeoFS **4.0** | Supported |
+| GeoFS **4.0 beta** | Supported |
 | Tampermonkey | Required |
-| Violentmonkey / Greasemonkey | Should work (GM_* APIs) |
+| Violentmonkey / Greasemonkey |
 
 ---
 
@@ -110,9 +95,8 @@ Charts are loaded from:
 
 - **Charts** — this repository (`charts/`)
 - **Airport names / positions** — [mwgg/airports](https://github.com/mwgg/airports)
-- **METAR** — [NOAA Aviation Weather Center](https://aviationweather.gov/)
-- **Digital ATIS** - ATIS sourced from live VATSIM online ATIS stations (If ATIS is not present at an airport, ATIS sourced from decoded METAR)
-- Aircraft icons from **Experimental Flight Interface (EFI)** by [Ferhatduran55](https://github.com/Ferhatduran55) — [geofs-experimental-fi](https://github.com/Ferhatduran55/geofs-experimental-fi).
+- **Digital ATIS and METAR** - Primary sourced from live [vATC Suite](https://www.atisgenerator.com/) and VATSIM 
+- Aircraft icons from **Experimental Flight Interface ** by [Ferhatduran55](https://github.com/Ferhatduran55) — [geofs-experimental-fi](https://github.com/Ferhatduran55/geofs-experimental-fi).
 
 ---
 
