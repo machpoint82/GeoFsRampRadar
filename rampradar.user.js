@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RampRadar — GeoFS Live Charts
 // @namespace    http://tampermonkey.net/
-// @version      1.0.2
+// @version      1.0.3
 // @description  Live airport surface charts for GeoFS — traffic, METAR, digital ATIS.
 // @author       machpoint82
 // @match        *://www.geo-fs.com/*
@@ -17,13 +17,14 @@
 // @connect      datis.clowd.io
 // @connect      metar.vatsim.net
 // @connect      data.vatsim.net
+// @connect      atisgenerator.com
 // ==/UserScript==
 
 (function () {
     'use strict';
     const CHARTS_BASE_URL = 'https://cdn.jsdelivr.net/gh/machpoint82/GeoFsRampRadar@main/charts';
     const AIRPORTS_URL = 'https://raw.githubusercontent.com/mwgg/airports/master/airports.json';
-    const SCRIPT_VERSION = '1.0.2';
+    const SCRIPT_VERSION = '1.0.3';
     const VERSION_CHECK_URL = 'https://raw.githubusercontent.com/machpoint82/GeoFsRampRadar/main/rampradar.user.js';
     const CHANGELOG_URL = 'https://raw.githubusercontent.com/machpoint82/GeoFsRampRadar/main/CHANGELOG.md';
     const ISSUES_URL = 'https://github.com/machpoint82/GeoFsRampRadar/issues';
@@ -31,7 +32,19 @@
     const METAR_CACHE_MS = 10 * 60 * 1000;
     const ATIS_CACHE_MS = 5 * 60 * 1000;
     const VATSIM_CACHE_MS = 60 * 1000;
+    const VATC_BASE = 'https://atisgenerator.com/api/v1';
+    const WX_CACHE_MS = 5 * 60 * 1000;
+    const WX_ATIS_SOFT_MS = 90 * 1000;
     const SCRIPT_CHANGELOG = {
+        '1.0.3': [
+            'Primary ATIS from vATC Suite (atisgenerator.com); VATSIM ATIS optional',
+            'METAR primarily from vATC Suite with VATSIM/NOAA fallbacks',
+            'Faster chart loads via in-memory cache and parallel weather probes',
+            'METAR/ATIS panel reuses cache',
+            'Session-only route, callsign, and last ICAO (cleared when a flight is over)',
+            'Airport name clears immediately when switching ICAO',
+            'ATIS availability dots next to ICAO (vATC Suite + VATSIM)'
+        ],
         '1.0.2': [
             'ATIS now sourced live from the VATSIM network (real controller-issued ATIS) when a station is online',
             'Falls back to automated D-ATIS, then decoded METAR, when no live VATSIM ATIS is available'
@@ -58,7 +71,8 @@
         ROUTE_ORIGIN: 'rampradar_route_origin',
         ROUTE_DEST: 'rampradar_route_dest',
         CALLSIGN: 'rampradar_callsign',
-        CHART_OFFSETS: 'rampradar_chart_offsets_v1'  // { ICAO: { eastM, northM } }
+        CHART_OFFSETS: 'rampradar_chart_offsets_v1',
+        ATIS_PREF: 'rampradar_atis_pref' // 'vatc' | 'vatsim'
     };
 
     function pageGeofs() {
@@ -107,6 +121,39 @@
     }
     function escapeHtml(s) {
         return (s || '').toString().replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+    function gmFetchJson(url, opts) {
+        opts = opts || {};
+        const method = opts.method || 'GET';
+        const body = opts.body != null ? (typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body)) : null;
+        const timeoutMs = opts.timeout || 12000;
+        return new Promise((resolve, reject) => {
+            if (typeof GM_xmlhttpRequest !== 'function') {
+                const fopts = { method, headers: { 'Accept': 'application/json' } };
+                if (body) { fopts.headers['Content-Type'] = 'application/json'; fopts.body = body; }
+                fetch(url, fopts).then(async (r) => {
+                    const text = await r.text();
+                    let json = null;
+                    try { json = JSON.parse(text); } catch (e) {}
+                    if (!r.ok) reject(new Error((json && json.message) || ('bad status ' + r.status)));
+                    else resolve(json);
+                }).catch(reject);
+                return;
+            }
+            const headers = { 'Accept': 'application/json' };
+            if (body) headers['Content-Type'] = 'application/json';
+            GM_xmlhttpRequest({
+                method, url, timeout: timeoutMs, headers, data: body || undefined,
+                onload: (res) => {
+                    let json = null;
+                    try { json = JSON.parse(res.responseText || ''); } catch (e) {}
+                    if (res.status >= 200 && res.status < 300) resolve(json);
+                    else reject(new Error((json && json.message) || ('bad status ' + res.status)));
+                },
+                onerror: () => reject(new Error('network error')),
+                ontimeout: () => reject(new Error('timeout'))
+            });
+        });
     }
     function formatClockHMS(d) {
         return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0');
@@ -479,8 +526,6 @@ const groups = {
         if (!det) return false;
         if (force || !pilotRoute.origin) pilotRoute.origin = det.origin || pilotRoute.origin;
         if (force || !pilotRoute.dest) pilotRoute.dest = det.dest || pilotRoute.dest;
-        gmSet(STORAGE.ROUTE_ORIGIN, pilotRoute.origin);
-        gmSet(STORAGE.ROUTE_DEST, pilotRoute.dest);
         return true;
     }
 
@@ -493,7 +538,7 @@ const groups = {
         return 'No route';
     }
     function getDisplayCallsign(fallback) {
-        const custom = (gmGet(STORAGE.CALLSIGN, '') || '').trim();
+        const custom = (sessionCallsign || '').trim();
         if (custom) return custom;
         try {
             const mp = pageMultiplayer();
@@ -599,18 +644,16 @@ const groups = {
     const chartViewState = {};
     let chartLoadState = { status: 'idle', icao: null, error: null };
     let chartState = null;
-    let activeIcao = gmGet(STORAGE.LAST_ICAO, '') || '';
-    let pilotRoute = {
-        origin: gmGet(STORAGE.ROUTE_ORIGIN, '') || '',
-        dest: gmGet(STORAGE.ROUTE_DEST, '') || ''
-    };
+    let activeIcao = '';
+    let pilotRoute = { origin: '', dest: '' };
+    let sessionCallsign = '';
     let activeTab = 'charts';
     let airportsDb = null;
 
     async function loadChartData(icao) {
         if (Object.prototype.hasOwnProperty.call(chartDataCache, icao)) return chartDataCache[icao];
         try {
-            const text = await gmFetchText(`${CHARTS_BASE_URL}/${icao}.json`);
+            const text = await gmFetchText(`${CHARTS_BASE_URL}/${icao}.json`, 20000);
             const json = JSON.parse(text);
             chartDataCache[icao] = json;
             return json;
@@ -1060,24 +1103,41 @@ function buildChartSVG(container, data, icao) {
         setBookmarks(list);
     }
 
-    const metarMemCache = {}, atisMemCache = {};
+        const metarMemCache = {}, atisMemCache = {}, vatcAtisCache = {}, atisAvailCache = {};
+    let wxPanelCache = { key: '', html: '', ts: 0 };
+
+    function getAtisPref() {
+        const v = gmGet(STORAGE.ATIS_PREF, 'vatc');
+        return v === 'vatsim' ? 'vatsim' : 'vatc';
+    }
+    function setAtisPref(v) {
+        gmSet(STORAGE.ATIS_PREF, v === 'vatsim' ? 'vatsim' : 'vatc');
+    }
+
     async function fetchMetarRaw(icao) {
         const cached = metarMemCache[icao];
         if (cached && (Date.now() - cached.ts < METAR_CACHE_MS)) return cached.result;
         let result;
         try {
-            const text = await gmFetchText('https://aviationweather.gov/api/data/metar?ids=' + encodeURIComponent(icao) + '&format=raw', 10000);
-            const raw = (text || '').trim().split('\n')[0];
+            const json = await gmFetchJson(VATC_BASE + '/airports/' + encodeURIComponent(icao) + '/metar', { timeout: 8000 });
+            const raw = json && json.data && json.data.metar;
             if (!raw) throw new Error('empty');
-            result = { raw };
+            result = { raw: String(raw).trim(), source: 'vatc' };
         } catch (e1) {
             try {
-                const text = await gmFetchText('https://metar.vatsim.net/' + icao, 8000);
+                const text = await gmFetchText('https://metar.vatsim.net/' + icao, 7000);
                 const raw = (text || '').trim();
                 if (!raw || raw.toLowerCase().includes('not found')) throw new Error('empty');
-                result = { raw };
+                result = { raw, source: 'vatsim' };
             } catch (e2) {
-                result = { error: 'No METAR available for ' + icao };
+                try {
+                    const text = await gmFetchText('https://aviationweather.gov/api/data/metar?ids=' + encodeURIComponent(icao) + '&format=raw', 9000);
+                    const raw = (text || '').trim().split('\n')[0];
+                    if (!raw) throw new Error('empty');
+                    result = { raw, source: 'noaa' };
+                } catch (e3) {
+                    result = { error: 'No METAR available for ' + icao };
+                }
             }
         }
         metarMemCache[icao] = { ts: Date.now(), result };
@@ -1112,12 +1172,66 @@ function buildChartSVG(container, data, icao) {
         const clouds = cloudToks.length ? cloudToks.map((c) => c.slice(0, 3) + ' ' + parseInt(c.slice(3, 6), 10) * 100 + 'ft').join(', ') : 'sky clear';
         return { time, wind, vis, temp, dew, qnh, clouds };
     }
+
+    function atisLetterFromTime() {
+        const h = new Date().getUTCHours();
+        return String.fromCharCode(65 + (h % 26));
+    }
+
+    async function fetchVatcRunways(icao) {
+        try {
+            const json = await gmFetchJson(VATC_BASE + '/airports/' + encodeURIComponent(icao) + '/runways', { timeout: 8000 });
+            const list = (json && json.data) || [];
+            return Array.isArray(list) ? list : [];
+        } catch (e) { return []; }
+    }
+
+    async function fetchVatcAtis(icao) {
+        const cached = vatcAtisCache[icao];
+        if (cached && (Date.now() - cached.ts < WX_ATIS_SOFT_MS)) return cached.result;
+        let result;
+        try {
+            const rwy = await fetchVatcRunways(icao);
+            const sorted = rwy.slice().sort((a, b) => {
+                const da = Number(a.wind_diff); const db = Number(b.wind_diff);
+                const na = Number.isFinite(da) ? da : 999; const nb = Number.isFinite(db) ? db : 999;
+                return na - nb;
+            });
+            let picks = sorted.slice(0, 2).map((x) => String(x.runway || '')).filter(Boolean);
+            if (!picks.length) picks = sorted.slice(0, 1).map((x) => String(x.runway || '')).filter(Boolean);
+            if (!picks.length) throw new Error('no runways');
+            const body = {
+                ident: atisLetterFromTime(),
+                icao: icao,
+                landing_runways: picks,
+                departing_runways: picks,
+                'output-type': 'atis'
+            };
+            const json = await gmFetchJson(VATC_BASE + '/airports/' + encodeURIComponent(icao) + '/atis', {
+                method: 'POST', body, timeout: 14000
+            });
+            const data = json && json.data;
+            if (!data || (!data.text && !data.spoken)) throw new Error('empty');
+            result = {
+                source: 'vatc',
+                text: data.text || data.spoken || '',
+                spoken: data.spoken || '',
+                code: body.ident,
+                runways: picks
+            };
+        } catch (e) {
+            result = { source: 'none', error: 'vATC Suite ATIS unavailable for ' + icao };
+        }
+        vatcAtisCache[icao] = { ts: Date.now(), result };
+        return result;
+    }
+
     async function fetchDigitalAtis(icao) {
         const cached = atisMemCache[icao];
         if (cached && (Date.now() - cached.ts < ATIS_CACHE_MS)) return cached.result;
         let result;
         try {
-            const text = await gmFetchText('https://datis.clowd.io/api/' + encodeURIComponent(icao), 10000);
+            const text = await gmFetchText('https://datis.clowd.io/api/' + encodeURIComponent(icao), 8000);
             const json = JSON.parse(text);
             const arr = Array.isArray(json) ? json : [json];
             if (!arr.length || !arr[0].datis) throw new Error('empty');
@@ -1131,16 +1245,17 @@ function buildChartSVG(container, data, icao) {
                 }))
             };
         } catch (e) {
-            result = { source: 'none', error: 'No digital ATIS (DATIS is mainly US). Showing decoded METAR instead.' };
+            result = { source: 'none', error: 'No digital ATIS (DATIS is mainly US).' };
         }
         atisMemCache[icao] = { ts: Date.now(), result };
         return result;
     }
+
     let vatsimDataCache = { ts: 0, data: null };
     async function getVatsimData() {
         if (vatsimDataCache.data && (Date.now() - vatsimDataCache.ts < VATSIM_CACHE_MS)) return vatsimDataCache.data;
         try {
-            const text = await gmFetchText('https://data.vatsim.net/v3/vatsim-data.json', 15000);
+            const text = await gmFetchText('https://data.vatsim.net/v3/vatsim-data.json', 12000);
             vatsimDataCache = { ts: Date.now(), data: JSON.parse(text) };
         } catch (e) {}
         return vatsimDataCache.data;
@@ -1157,6 +1272,51 @@ function buildChartSVG(container, data, icao) {
             text: Array.isArray(m.text_atis) ? m.text_atis.join(' ') : (m.text_atis || '')
         }));
     }
+
+    async function probeAtisAvailability(icao) {
+        const cached = atisAvailCache[icao];
+        if (cached && (Date.now() - cached.ts < 3 * 60 * 1000)) return cached.result;
+        const result = { vatc: false, vatsim: false };
+        const tasks = [
+            gmFetchJson(VATC_BASE + '/airports/' + encodeURIComponent(icao) + '/metar', { timeout: 6000 })
+                .then((j) => { if (j && j.status === 'success' && j.data && j.data.metar) result.vatc = true; })
+                .catch(() => {}),
+            getVatsimData().then((d) => {
+                if (!d || !Array.isArray(d.atis)) return;
+                result.vatsim = d.atis.some((a) => (a.callsign || '').toUpperCase().startsWith(icao.toUpperCase() + '_'));
+            }).catch(() => {})
+        ];
+        await Promise.all(tasks);
+        atisAvailCache[icao] = { ts: Date.now(), result };
+        return result;
+    }
+
+    function renderAtisDotsHtml(avail) {
+        const v = avail || { vatc: false, vatsim: false };
+        const vatcCls = v.vatc ? 'rr-dot on' : 'rr-dot off';
+        const vatCls = v.vatsim ? 'rr-dot on' : 'rr-dot off';
+        return `<span class="rr-atis-dots" title="ATIS availability: green = available">` +
+            `<span class="${vatcCls}" title="vATC Suite">A</span>` +
+            `<span class="${vatCls}" title="VATSIM live ATIS">V</span></span>`;
+    }
+
+    async function updateAtisDots(icao) {
+        const host = panelEl && (panelEl.querySelector('#rr-atis-dots-host') || panelEl.querySelector('.icao-tag'));
+        if (!host) return;
+        let slot = panelEl.querySelector('#rr-atis-dots-host');
+        if (!slot) {
+            slot = document.createElement('span');
+            slot.id = 'rr-atis-dots-host';
+            const tag = panelEl.querySelector('.icao-tag');
+            if (tag && tag.parentNode) tag.parentNode.insertBefore(slot, tag.nextSibling);
+            else return;
+        }
+        if (!icao || !/^[A-Z0-9]{4}$/.test(icao)) { slot.innerHTML = ''; return; }
+        slot.innerHTML = renderAtisDotsHtml({ vatc: false, vatsim: false });
+        const avail = await probeAtisAvailability(icao);
+        if (activeIcao === icao) slot.innerHTML = renderAtisDotsHtml(avail);
+    }
+
     let remoteVersion = null;
     let remoteChangelogText = null;
     let versionCheckDone = false;
@@ -1340,6 +1500,14 @@ function buildChartSVG(container, data, icao) {
             #rampradar-status { font-size: 11px; color: #8397ae; margin-bottom: 6px; display: none; flex-shrink: 0; }
             #rampradar-status .warn { color: #e0955c; }
             #rampradar-status a { color: #22d3ee; }
+            .rr-atis-dots { display: inline-flex; gap: 4px; margin-left: 6px; vertical-align: middle; }
+            .rr-dot {
+                width: 16px; height: 16px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+                font-size: 8px; font-weight: 900; color: #052024; border: 1px solid transparent;
+            }
+            .rr-dot.on { background: #34d399; border-color: #6ee7b7; }
+            .rr-dot.off { background: #ef4444; border-color: #fca5a5; color: #fff; }
+            #rampradar-tools .mode-btn.active { background: linear-gradient(180deg,#5eead4,#22d3ee); color: #052024; border-color: transparent; }
             .rampradar-chart-wrap { position: relative; flex: 1; min-height: 0; border: 1px solid #1e3552; border-radius: 12px; overflow: hidden; background: #0a1420; }
             #rampradar-canvas { position: absolute; inset: 0; width: 100%; height: 100%; background: #0b1524; }
             #rampradar-canvas svg { width: 100%; height: 100%; display: block; }
@@ -1408,41 +1576,66 @@ function buildChartSVG(container, data, icao) {
             return;
         }
         activeIcao = icao;
-        gmSet(STORAGE.LAST_ICAO, icao);
         chartLoadState = { status: 'loading', icao, error: null };
         updateStatus();
         const tag = panelEl && panelEl.querySelector('.icao-tag');
         if (tag) tag.textContent = icao;
+        const nameEl = panelEl && panelEl.querySelector('#rr-apt-name');
+        if (nameEl) nameEl.textContent = 'Loading…';
+        updateAtisDots(icao);
+        // Instant paint from memory cache if present
+        if (Object.prototype.hasOwnProperty.call(chartDataCache, icao) && chartDataCache[icao]) {
+            const data = chartDataCache[icao];
+            finishChartLoad(icao, data);
+            ensureAirportsDb().then(() => {
+                if (activeIcao === icao && nameEl) {
+                    const label = airportLabel(icao);
+                    nameEl.textContent = label || '';
+                }
+            });
+            return;
+        }
         loadChartData(icao).then((data) => {
             if (activeIcao !== icao) return;
-            const canvas = panelEl && panelEl.querySelector('#rampradar-canvas');
-            const legendEl = panelEl && panelEl.querySelector('#rampradar-legend');
-            if (!canvas) return;
-            if (!data) {
-                chartLoadState = { status: 'missing', icao, error: null };
-                canvas.innerHTML = '';
-                if (legendEl) legendEl.innerHTML = '';
-                chartState = null;
-                updateStatus();
-                return;
-            }
-            chartLoadState = { status: 'ready', icao, error: null };
-            updateStatus();
-            const built = buildChartSVG(canvas, data, icao);
-            chartState = built;
-            try {
-                const path = chartState.acEl && chartState.acEl.querySelector('path');
-                if (path) path.setAttribute('class', 'aircraft');
-            } catch (e) {}
-            bindOwnHover();
-            if (legendEl && !minimized) renderChartLegend(legendEl, built.freqRows || []);
-            applyChartLayers();
-            updateChartAircraft();
-            updateChartOtherAircraft();
+            finishChartLoad(icao, data);
+            ensureAirportsDb().then(() => {
+                if (activeIcao !== icao) return;
+                const nameEl = panelEl && panelEl.querySelector('#rr-apt-name');
+                if (nameEl) nameEl.textContent = airportLabel(icao) || (data ? '' : 'Unknown airport code');
+            });
         }).catch((e) => {
+            if (activeIcao !== icao) return;
             chartLoadState = { status: 'error', icao, error: (e && e.message) || 'Failed' };
             updateStatus();
+            const nameEl = panelEl && panelEl.querySelector('#rr-apt-name');
+            if (nameEl) nameEl.textContent = '';
         });
+    }
+    function finishChartLoad(icao, data) {
+        const canvas = panelEl && panelEl.querySelector('#rampradar-canvas');
+        const legendEl = panelEl && panelEl.querySelector('#rampradar-legend');
+        if (!canvas) return;
+        if (!data) {
+            chartLoadState = { status: 'missing', icao, error: null };
+            canvas.innerHTML = '';
+            if (legendEl) legendEl.innerHTML = '';
+            chartState = null;
+            updateStatus();
+            return;
+        }
+        chartLoadState = { status: 'ready', icao, error: null };
+        updateStatus();
+        const built = buildChartSVG(canvas, data, icao);
+        chartState = built;
+        try {
+            const path = chartState.acEl && chartState.acEl.querySelector('path');
+            if (path) path.setAttribute('class', 'aircraft');
+        } catch (e) {}
+        bindOwnHover();
+        if (legendEl && !minimized) renderChartLegend(legendEl, built.freqRows || []);
+        applyChartLayers();
+        updateChartAircraft();
+        updateChartOtherAircraft();
     }
     function updateStatus() {
         const statusEl = panelEl && panelEl.querySelector('#rampradar-status');
@@ -1482,7 +1675,7 @@ function buildChartSVG(container, data, icao) {
                 <button type="button" class="route-chip ${o ? '' : 'empty'}" id="rr-origin-chip" title="Load origin chart">${o ? escapeHtml(o) : 'ORIG'}</button>
                 <button type="button" class="route-chip ${d ? '' : 'empty'}" id="rr-dest-chip" title="Load destination chart">${d ? escapeHtml(d) : 'DEST'}</button>
                 <button type="button" id="rr-fp-sync" title="Sync from flight plan">FP</button>
-                <input id="rr-callsign" type="text" placeholder="Callsign" maxlength="16" value="${escapeHtml(gmGet(STORAGE.CALLSIGN, '') || '')}" title="Optional callsign shown on hover">
+                <input id="rr-callsign" type="text" placeholder="Callsign" maxlength="16" value="${escapeHtml(sessionCallsign)}" title="Optional callsign shown on hover">
             </div>
             <div id="rr-apt-name" class="rr-muted rr-full-only" style="margin:-2px 0 8px;min-height:14px;"></div>
             <div id="rampradar-status"></div>
@@ -1557,7 +1750,7 @@ function buildChartSVG(container, data, icao) {
             else alert('No ICAO waypoints found on the flight plan.');
         };
         const cs = body.querySelector('#rr-callsign');
-        if (cs) cs.onchange = () => gmSet(STORAGE.CALLSIGN, (cs.value || '').trim());
+        if (cs) cs.onchange = () => { sessionCallsign = (cs.value || '').trim(); };
         if (activeIcao) loadChartForIcao(activeIcao);
         else updateStatus();
     }
@@ -1593,13 +1786,43 @@ function buildChartSVG(container, data, icao) {
         if (!icao) return `<div class="rr-card"><div class="rr-label">${escapeHtml(label)}</div><div class="rr-muted">Not set — use FP sync or set route on Charts.</div></div>`;
         await ensureAirportsDb();
         const aptName = airportLabel(icao);
-        const [metar, vatisRes, datisRes] = await Promise.all([fetchMetarRaw(icao), fetchVatsimAtis(icao), fetchDigitalAtis(icao)]);
+        const pref = getAtisPref();
+        const [metar, vatcAtis, vatisRes, datisRes] = await Promise.all([
+            fetchMetarRaw(icao),
+            fetchVatcAtis(icao),
+            fetchVatsimAtis(icao),
+            fetchDigitalAtis(icao)
+        ]);
         let html = `<div class="rr-card"><div class="rr-label">${escapeHtml(label)} · ${escapeHtml(icao)}</div>`;
         if (aptName) html += `<div class="rr-muted" style="margin-bottom:6px;">${escapeHtml(aptName)}</div>`;
         if (metar.error) html += `<div class="rr-muted" style="color:#e0955c;">${escapeHtml(metar.error)}</div>`;
-        else html += `<div class="rr-label" style="margin-top:6px;">METAR</div><div class="rr-atis">${escapeHtml(metar.raw)}</div>`;
-        if (vatisRes && vatisRes.length) {
-            html += `<div class="rr-label" style="margin-top:10px;color:#5eead4;">LIVE ATIS — VATSIM NETWORK</div>`;
+        else {
+            html += `<div class="rr-label" style="margin-top:6px;">METAR${metar.source ? ' · ' + escapeHtml(metar.source.toUpperCase()) : ''}</div>`;
+            html += `<div class="rr-atis">${escapeHtml(metar.raw)}</div>`;
+        }
+
+        const showVatsim = pref === 'vatsim' || (vatisRes && vatisRes.length);
+        const showVatc = pref === 'vatc' || !(vatisRes && vatisRes.length);
+
+        if (pref === 'vatsim' && vatisRes && vatisRes.length) {
+            html += `<div class="rr-label" style="margin-top:10px;color:#5eead4;">LIVE ATIS — VATSIM</div>`;
+            html += vatisRes.map((it) =>
+                `<div class="rr-muted" style="margin-top:4px;">${escapeHtml(it.callsign)} ${it.code ? '· Info ' + escapeHtml(it.code) : ''} ${it.freq ? '· ' + escapeHtml(it.freq) : ''}</div>
+                 <div class="rr-atis">${escapeHtml(it.text)}</div>`
+            ).join('');
+        } else if (vatcAtis && vatcAtis.source === 'vatc' && vatcAtis.text) {
+            html += `<div class="rr-label" style="margin-top:10px;color:#22d3ee;">ATIS — vATC Suite</div>`;
+            html += `<div class="rr-muted" style="margin-top:4px;">Info ${escapeHtml(vatcAtis.code || '—')}${vatcAtis.runways && vatcAtis.runways.length ? ' · RWY ' + escapeHtml(vatcAtis.runways.join(', ')) : ''}</div>`;
+            html += `<div class="rr-atis">${escapeHtml(vatcAtis.text)}</div>`;
+            if (vatisRes && vatisRes.length) {
+                html += `<div class="rr-label" style="margin-top:10px;color:#5eead4;">ALSO ONLINE — VATSIM</div>`;
+                html += vatisRes.map((it) =>
+                    `<div class="rr-muted" style="margin-top:4px;">${escapeHtml(it.callsign)} ${it.code ? '· Info ' + escapeHtml(it.code) : ''}</div>
+                     <div class="rr-atis">${escapeHtml(it.text)}</div>`
+                ).join('');
+            }
+        } else if (vatisRes && vatisRes.length) {
+            html += `<div class="rr-label" style="margin-top:10px;color:#5eead4;">LIVE ATIS — VATSIM</div>`;
             html += vatisRes.map((it) =>
                 `<div class="rr-muted" style="margin-top:4px;">${escapeHtml(it.callsign)} ${it.code ? '· Info ' + escapeHtml(it.code) : ''} ${it.freq ? '· ' + escapeHtml(it.freq) : ''}</div>
                  <div class="rr-atis">${escapeHtml(it.text)}</div>`
@@ -1607,11 +1830,11 @@ function buildChartSVG(container, data, icao) {
         } else if (datisRes.source === 'datis' && datisRes.items && datisRes.items.length) {
             html += `<div class="rr-label" style="margin-top:10px;">AUTOMATED D-ATIS</div>`;
             html += datisRes.items.map((it) =>
-                `<div class="rr-muted" style="margin-top:4px;">Info ${escapeHtml(it.code || '—')} ${it.time ? '· ' + escapeHtml(it.time) + 'Z' : ''} ${it.type ? '(' + escapeHtml(it.type) + ')' : ''}</div>
+                `<div class="rr-muted" style="margin-top:4px;">Info ${escapeHtml(it.code || '—')} ${it.time ? '· ' + escapeHtml(it.time) + 'Z' : ''}</div>
                  <div class="rr-atis">${escapeHtml(it.text)}</div>`
             ).join('');
         } else {
-            html += `<div class="rr-label" style="margin-top:10px;">DECODED METAR <span style="font-weight:600;opacity:0.7;">(no live ATIS on station)</span></div>`;
+            html += `<div class="rr-label" style="margin-top:10px;">DECODED METAR <span style="font-weight:600;opacity:0.7;">(no ATIS)</span></div>`;
             if (metar.raw && !metar.error) {
                 const dec = decodeMetarSummary(metar.raw);
                 if (dec) {
@@ -1623,15 +1846,23 @@ function buildChartSVG(container, data, icao) {
                     <div class="rr-row"><span>QNH</span><span>${escapeHtml(dec.qnh)}</span></div>`;
                 }
             } else {
-                html += `<div class="rr-muted">${escapeHtml(datisRes.error || 'Unavailable')}</div>`;
+                html += `<div class="rr-muted">Unavailable</div>`;
             }
         }
         html += `</div>`;
         return html;
     }
-    function renderWeatherTab(body) {
+
+function renderWeatherTab(body) {
         syncRouteFromFlightPlan(false);
-        body.innerHTML = `<div class="rr-muted" style="margin-bottom:8px;">Origin & destination from your route / flight plan. Live ATIS from the VATSIM network when a station is online, then automated D-ATIS (mainly US), then decoded METAR. METAR from NOAA.</div>
+        const pref = getAtisPref();
+        body.innerHTML = `<div class="rr-muted" style="margin-bottom:8px;">Primary ATIS: <b style="color:#22d3ee">vATC Suite</b>. Optional VATSIM live ATIS. METAR from vATC Suite (fallback VATSIM/NOAA).</div>
+            <div style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+                <span class="rr-label" style="margin:0;">ATIS SOURCE</span>
+                <button type="button" class="mode-btn ${pref === 'vatc' ? 'active' : ''}" id="rr-pref-vatc">vATC Suite</button>
+                <button type="button" class="mode-btn ${pref === 'vatsim' ? 'active' : ''}" id="rr-pref-vatsim">VATSIM</button>
+                <button type="button" class="mode-btn" id="rr-wx-refresh">REFRESH</button>
+            </div>
             <div id="rr-wx-blocks"><div class="rr-muted">Loading…</div></div>
             <div class="rr-label" style="margin-top:8px;">LOOKUP</div>
             <div id="rampradar-search-row">
@@ -1639,23 +1870,60 @@ function buildChartSVG(container, data, icao) {
                 <button type="button" id="rr-wx-go">FETCH</button>
             </div>
             <div id="rr-wx-extra"></div>`;
+        body.querySelector('#rr-pref-vatc').onclick = () => { setAtisPref('vatc'); wxPanelCache = { key: '', html: '', ts: 0 }; renderBody(); };
+        body.querySelector('#rr-pref-vatsim').onclick = () => { setAtisPref('vatsim'); wxPanelCache = { key: '', html: '', ts: 0 }; renderBody(); };
+        body.querySelector('#rr-wx-refresh').onclick = () => {
+            const icaos = [pilotRoute.origin, pilotRoute.dest].filter(Boolean);
+            icaos.forEach((c) => {
+                delete metarMemCache[c];
+                delete vatcAtisCache[c];
+                delete atisMemCache[c];
+                delete atisAvailCache[c];
+            });
+            vatsimDataCache = { ts: 0, data: null };
+            wxPanelCache = { key: '', html: '', ts: 0 };
+            renderBody();
+        };
         const blocks = body.querySelector('#rr-wx-blocks');
-        Promise.all([
-            wxBlockHtml('ORIGIN', pilotRoute.origin),
-            wxBlockHtml('DESTINATION', pilotRoute.dest)
-        ]).then(([a, b]) => { blocks.innerHTML = a + b; });
+        const cacheKey = [pilotRoute.origin || '', pilotRoute.dest || '', getAtisPref()].join('|');
+        if (wxPanelCache.key === cacheKey && wxPanelCache.html && (Date.now() - wxPanelCache.ts < WX_CACHE_MS)) {
+            blocks.innerHTML = wxPanelCache.html;
+        } else {
+            Promise.all([
+                wxBlockHtml('ORIGIN', pilotRoute.origin),
+                wxBlockHtml('DESTINATION', pilotRoute.dest)
+            ]).then(([a, b]) => {
+                const html = a + b;
+                wxPanelCache = { key: cacheKey, html, ts: Date.now() };
+                if (activeTab === 'weather') blocks.innerHTML = html;
+            });
+        }
+        // Soft refresh ATIS in background if cache older than soft window
+        if (wxPanelCache.key === cacheKey && wxPanelCache.html && (Date.now() - wxPanelCache.ts > WX_ATIS_SOFT_MS)) {
+            Promise.all([
+                wxBlockHtml('ORIGIN', pilotRoute.origin),
+                wxBlockHtml('DESTINATION', pilotRoute.dest)
+            ]).then(([a, b]) => {
+                const html = a + b;
+                wxPanelCache = { key: cacheKey, html, ts: Date.now() };
+                if (activeTab === 'weather' && body.querySelector('#rr-wx-blocks')) {
+                    body.querySelector('#rr-wx-blocks').innerHTML = html;
+                }
+            });
+        }
         const go = async () => {
             const icao = (body.querySelector('#rr-wx-icao').value || '').trim().toUpperCase();
             const extra = body.querySelector('#rr-wx-extra');
             if (!/^[A-Z]{4}$/.test(icao)) { extra.innerHTML = '<div class="rr-muted" style="color:#e0955c;">Invalid ICAO</div>'; return; }
             extra.innerHTML = '<div class="rr-muted">Loading…</div>';
+            delete metarMemCache[icao]; delete vatcAtisCache[icao]; delete atisMemCache[icao];
             extra.innerHTML = await wxBlockHtml('LOOKUP', icao);
         };
         body.querySelector('#rr-wx-go').onclick = go;
         body.querySelector('#rr-wx-icao').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } };
     }
 
-    function renderToolsTab(body) {
+function renderToolsTab(body) {
         checkForUpdate();
         const clLines = isUpdateAvailable() ? changelogBulletsFor(remoteVersion) : [];
         const clHtml = clLines.length
