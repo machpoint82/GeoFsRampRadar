@@ -4,8 +4,8 @@
 // @version      1.0.3
 // @description  Live airport surface charts for GeoFS — traffic, METAR, digital ATIS.
 // @author       machpoint82
-// @match        *://www.geo-fs.com/*
-// @match        *://geo-fs.com/*
+// @match        https://www.geo-fs.com/geofs.php*
+// @match        https://*.geo-fs.com/geofs.php*
 // @icon         https://raw.githubusercontent.com/machpoint82/GeoFsRampRadar/main/preview/icon.png
 // @grant        GM_setValue
 // @grant        GM_getValue
