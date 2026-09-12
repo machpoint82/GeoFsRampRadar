@@ -2,6 +2,8 @@
 
 # RampRadar
 
+## Due to Academic reasons, more airports charts as well as new updates will not be added till late december
+
 <p align="center">
   <img src="preview/preview.png" alt="RampRadar preview" width="720">
 </p>
